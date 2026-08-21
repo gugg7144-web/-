@@ -2,8 +2,9 @@ name: Yunxiao Weekly Report
 
 on:
   schedule:
-    - cron: '0 9 * * 5'
-  workflow_dispatch:
+  # UTC 时间 01:00 即北京时间每周一 09:00
+  - cron: '0 1 * * 1'
+  workflow_dispatch: # 支持在 GitHub 页面手动点击按钮触发测试
 
 jobs:
   run-report:
@@ -21,5 +22,6 @@ jobs:
         run: pip install requests
 
       - name: Run weekly report script
+        # 指定在 weekly_report 目录下运行脚本
         working-directory: ./weekly_report
         run: python weekly_report.py
