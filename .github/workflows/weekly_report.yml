@@ -24,4 +24,4 @@ jobs:
       - name: Run weekly report script
         # 指定在 weekly_report 目录下运行脚本
         working-directory: ./weekly_report
-        run: python weekly_report.py
+        run: python multi_weekly_report.py
