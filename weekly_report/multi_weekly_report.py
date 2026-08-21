@@ -10,17 +10,31 @@ from urllib3.util.retry import Retry
 # 禁用未验证 HTTPS 请求警告
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-# ==================== 1. 参数设置 ====================
-YUNXIAO_TOKEN = os.getenv("YUNXIAO_TOKEN", "pt-J1oh7LaBqfOGblP7nXiCReaN_d6ed378b-f856-4f3b-a0b0-5aa45954a91b")
-ORGANIZATION_ID = os.getenv("ORGANIZATION_ID", "624580543add99e4db45a523")
-TARGET_PROJECT = os.getenv("TARGET_PROJECT", "简单购软件")
-TARGET_ASSIGNEE = os.getenv("TARGET_ASSIGNEE", "谷元璋")
-BOT_WEBHOOK = os.getenv("BOT_WEBHOOK", "https://open.feishu.cn/open-apis/bot/v2/hook/63ff6aa9-7b39-40da-8467-2973a620b750")
+# ==================== 【多人周报配置，在这里增加/删除人员】 ====================
+PERSON_CONFIGS = [
+    {
+        "name": "谷元璋",
+        "YUNXIAO_TOKEN": "pt-J1oh7LaBqfOGblP7nXiCReaN_d6ed378b-f856-4f3b-a0b0-5aa45954a91b",
+        "ORGANIZATION_ID": "624580543add99e4db45a523",
+        "TARGET_PROJECT": "简单购软件",
+        "TARGET_ASSIGNEE": "谷元璋",
+        "BOT_WEBHOOK": "https://open.feishu.cn/open-apis/bot/v2/hook/63ff6aa9-7b39-40da-8467-2973a620b750"
+    },
+    {
+        "name": "秦巧丽",
+        "YUNXIAO_TOKEN": "pt-zzG7HswTyiqRLQkCzlxPiG6C_03a9cac5-94fa-4c2d-b822-2bd0a810616d",
+        "ORGANIZATION_ID": "624580543add99e4db45a523",
+        "TARGET_PROJECT": "简单购软件",
+        "TARGET_ASSIGNEE": "秦巧丽",
+        "BOT_WEBHOOK": "https://open.feishu.cn/open-apis/bot/v2/hook/745a6f96-9f41-44f6-b990-7d5ab416e1ed"
+    }
+]
 
 # ==================== 2. 状态映射配置 ====================
 CREATE_TIME_CHECK_STATUSES = ["待立项", "待设计"]  # 移除 "待产品内审"
 STATUS_COMPLETED = ["已完成", "已发布", "已上线"]
 STATUS_CANCELLED = ["已拒绝", "暂不支持", "已取消", "已终止"]
+
 
 # ==================== 3. 工具函数与 API 接口调用 ====================
 def parse_yunxiao_time(val):
@@ -41,11 +55,14 @@ def parse_yunxiao_time(val):
         pass
     return None
 
+
+# 注意：get_headers 读取全局 YUNXIAO_TOKEN，循环的时候会动态覆盖全局变量
 def get_headers():
     return {
         "x-yunxiao-token": YUNXIAO_TOKEN,
         "Content-Type": "application/json"
     }
+
 
 def fetch_project_space_id():
     url = f"https://openapi-rdc.aliyuncs.com/oapi/v1/projex/organizations/{ORGANIZATION_ID}/projects:search"
@@ -66,6 +83,7 @@ def fetch_project_space_id():
         print(f"❌ 查询项目 spaceId 异常: {e}")
     return None
 
+
 def fetch_recent_workitems():
     space_id = fetch_project_space_id()
     if not space_id:
@@ -80,7 +98,7 @@ def fetch_recent_workitems():
     ]
 
     raw_items = []
-    
+
     for url in candidate_urls:
         page = 1
         url_success = False
@@ -115,7 +133,7 @@ def fetch_recent_workitems():
                     # 2. 当前页拉取不足 100 条说明已到尾页，直接结束循环
                     if len(items_page) < 100:
                         break
-                    
+
                     page += 1
                 else:
                     break
@@ -174,8 +192,9 @@ def fetch_recent_workitems():
 
     return filtered_items
 
+
 # ==================== 4. 数据整理与 Markdown 生成 ====================
-def generate_weekly_markdown(workitems):
+def generate_weekly_markdown(workitems, assignee_name):
     completed_items = []
     cancelled_items = []
     in_progress_map = defaultdict(list)
@@ -222,8 +241,9 @@ def generate_weekly_markdown(workitems):
 
     return md_content
 
+
 # ==================== 5. 飞书卡片消息推送 (带 SSL 重试与容错机制) ====================
-def send_feishu_card(markdown_text, count):
+def send_feishu_card(markdown_text, count, assignee_name, webhook_url):
     today_str = datetime.now().strftime("%Y-%m-%d")
 
     payload = {
@@ -249,7 +269,7 @@ def send_feishu_card(markdown_text, count):
                     "elements": [
                         {
                             "tag": "plain_text",
-                            "content": f"👤 负责人：谷元璋 | 📈 本周包含需求共 {count} 项 | 🤖 自动化推送"
+                            "content": f"👤 负责人：{assignee_name} | 📈 本周包含需求共 {count} 项 | 🤖 自动化推送"
                         }
                     ]
                 }
@@ -267,31 +287,49 @@ def send_feishu_card(markdown_text, count):
     }
 
     try:
-        res = session.post(BOT_WEBHOOK, json=payload, headers=headers, timeout=15)
+        res = session.post(webhook_url, json=payload, headers=headers, timeout=15)
         res_json = res.json()
         if res_json.get("code") == 0 or res_json.get("StatusCode") == 0:
-            print("✅ 飞书卡片周报发送成功！")
+            print(f"✅ [{assignee_name}] 飞书卡片周报发送成功！")
         else:
-            print(f"⚠️ 飞书推送返回异常: {res_json}")
+            print(f"⚠️ [{assignee_name}] 飞书推送返回异常: {res_json}")
     except Exception as e:
-        print(f"⚠️ 第一次推送遇 SSL 网络波动，尝试使用容错模式重新发送... 错误细节: {e}")
+        print(f"⚠️ [{assignee_name}] 第一次推送遇 SSL 网络波动，尝试使用容错模式重新发送... 错误细节: {e}")
         try:
-            res = requests.post(BOT_WEBHOOK, json=payload, headers=headers, timeout=15, verify=False)
+            res = requests.post(webhook_url, json=payload, headers=headers, timeout=15, verify=False)
             res_json = res.json()
             if res_json.get("code") == 0 or res_json.get("StatusCode") == 0:
-                print("✅ 飞书卡片周报（容错模式）发送成功！")
+                print(f"✅ [{assignee_name}] 飞书卡片周报（容错模式）发送成功！")
             else:
-                print(f"⚠️ 飞书推送返回异常: {res_json}")
+                print(f"⚠️ [{assignee_name}] 飞书推送返回异常: {res_json}")
         except Exception as ex:
-            print(f"❌ 飞书推送最终失败: {ex}")
+            print(f"❌ [{assignee_name}] 飞书推送最终失败: {ex}")
 
-# ==================== 主入口 ====================
+
+# ==================== 主入口：循环遍历每一个人 ====================
 if __name__ == "__main__":
-    print("🚀 开始检索云效【简单购软件】项目（负责人：谷元璋）的需求数据...")
-    items = fetch_recent_workitems()
-    print(f"📦 共检索到 {len(items)} 条符合条件的需求数据。")
+    for person_cfg in PERSON_CONFIGS:
+        print("\n" + "="*60)
+        print(f"🚀 开始处理【{person_cfg['name']}】的周报任务")
+        print("="*60)
 
-    report_md = generate_weekly_markdown(items)
+        # 动态覆盖全局变量，给底层函数使用
+        global YUNXIAO_TOKEN, ORGANIZATION_ID, TARGET_PROJECT, TARGET_ASSIGNEE, BOT_WEBHOOK
+        YUNXIAO_TOKEN = person_cfg["YUNXIAO_TOKEN"]
+        ORGANIZATION_ID = person_cfg["ORGANIZATION_ID"]
+        TARGET_PROJECT = person_cfg["TARGET_PROJECT"]
+        TARGET_ASSIGNEE = person_cfg["TARGET_ASSIGNEE"]
+        BOT_WEBHOOK = person_cfg["BOT_WEBHOOK"]
 
-    print("📤 正在向飞书群推送周报卡片...")
-    send_feishu_card(report_md, len(items))
+        # 拉取该负责人需求
+        items = fetch_recent_workitems()
+        print(f"📦 [{person_cfg['name']}] 共检索到 {len(items)} 条符合条件的需求数据。")
+
+        # 生成周报markdown
+        report_md = generate_weekly_markdown(items, person_cfg["name"])
+
+        # 发送对应webhook
+        print(f"📤 正在向【{person_cfg['name']}】飞书群推送周报卡片...")
+        send_feishu_card(report_md, len(items), person_cfg["name"], person_cfg["BOT_WEBHOOK"])
+
+    print("\n🎉 全部人员周报任务执行完毕！")
