@@ -86,7 +86,8 @@ def fetch_recent_workitems():
         url_success = False
         fetched_for_this_url = []
 
-        while page <= 10:
+        # 扩充单接口翻页上限至 50 页（最大支持 5000 条需求数据）
+        while page <= 50:
             payload = {
                 "category": "Req",
                 "spaceId": space_id,
@@ -107,9 +108,11 @@ def fetch_recent_workitems():
                     if not items_page:
                         break
 
+                    # 1. 先把当前页数据存入列表（保证尾页不被遗漏）
                     fetched_for_this_url.extend(items_page)
                     url_success = True
 
+                    # 2. 当前页拉取不足 100 条说明已到尾页，直接结束循环
                     if len(items_page) < 100:
                         break
                     
@@ -146,18 +149,22 @@ def fetch_recent_workitems():
 
         match_time = False
 
-        # --- 核心修改逻辑 ---
+        # --- 业务筛选规则 ---
         if status_name == "待产品内审":
-            # 【待产品内审】全量保留，不受时间限制
+            # 【待产品内审】全量统计，忽略创建时间
             match_time = True
         elif status_name in CREATE_TIME_CHECK_STATUSES:
             # 【待立项】、【待设计】只校验近 7 天创建
             if create_dt and create_dt >= seven_days_ago:
                 match_time = True
         elif status_name in STATUS_COMPLETED or status_name in STATUS_CANCELLED:
-            # 【已完成】、【已取消】校验近 7 天修改
-            if modify_dt and modify_dt >= seven_days_ago:
+            # 【已完成/已取消】使用【状态变更时间 updateStatusAt】判断，不是最后修改时间
+            status_change_dt = parse_yunxiao_time(item.get("updateStatusAt"))
+            if status_change_dt and status_change_dt >= seven_days_ago:
                 match_time = True
+            else:
+                # 状态变更时间不在统计周期，不纳入周报
+                match_time = False
         else:
             # 其它推进中的状态（如开发中、测试中等）默认保留
             match_time = True
@@ -215,7 +222,7 @@ def generate_weekly_markdown(workitems):
 
     return md_content
 
-# ==================== 5. 飞书卡片消息推送 (已增加 SSL 重试机制) ====================
+# ==================== 5. 飞书卡片消息推送 (带 SSL 重试与容错机制) ====================
 def send_feishu_card(markdown_text, count):
     today_str = datetime.now().strftime("%Y-%m-%d")
 
@@ -250,7 +257,6 @@ def send_feishu_card(markdown_text, count):
         }
     }
 
-    # 创建带有重试机制和自定义请求头的 Session
     session = requests.Session()
     retries = Retry(total=3, backoff_factor=1, status_forcelist=[500, 502, 503, 504])
     session.mount('https://', HTTPAdapter(max_retries=retries))
@@ -261,7 +267,6 @@ def send_feishu_card(markdown_text, count):
     }
 
     try:
-        # 尝试标准 HTTPS 请求
         res = session.post(BOT_WEBHOOK, json=payload, headers=headers, timeout=15)
         res_json = res.json()
         if res_json.get("code") == 0 or res_json.get("StatusCode") == 0:
@@ -269,9 +274,8 @@ def send_feishu_card(markdown_text, count):
         else:
             print(f"⚠️ 飞书推送返回异常: {res_json}")
     except Exception as e:
-        print(f"⚠️ 第一次推送遇 SSL 网络波动，尝试使用非严格模式重新发送... 错误细节: {e}")
+        print(f"⚠️ 第一次推送遇 SSL 网络波动，尝试使用容错模式重新发送... 错误细节: {e}")
         try:
-            # 降级容错：禁用 verify 以解决 GitHub Actions 节点的 SSL EOF 报错
             res = requests.post(BOT_WEBHOOK, json=payload, headers=headers, timeout=15, verify=False)
             res_json = res.json()
             if res_json.get("code") == 0 or res_json.get("StatusCode") == 0:
