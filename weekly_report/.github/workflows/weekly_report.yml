@@ -22,4 +22,4 @@ jobs:
 
       - name: Run weekly report script
         working-directory: ./weekly_report
-        run: python weekly_report.py
+        run: python multi_weekly_report.py
