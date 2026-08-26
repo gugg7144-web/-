@@ -10,7 +10,7 @@ from urllib3.util.retry import Retry
 # 禁用未验证 HTTPS 请求警告
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-# ==================== 【多人周报配置，在这里增加/删除人员】 ====================
+# ==================== 1. 【多人周报配置，在这里增加/删除人员】 ====================
 PERSON_CONFIGS = [
     {
         "name": "谷元璋",
@@ -27,14 +27,21 @@ PERSON_CONFIGS = [
         "TARGET_PROJECT": "简单购软件",
         "TARGET_ASSIGNEE": "秦巧丽",
         "BOT_WEBHOOK": "https://open.feishu.cn/open-apis/bot/v2/hook/745a6f96-9f41-44f6-b990-7d5ab416e1ed"
+    },
+    {
+        "name": "贾晨阳",
+        "YUNXIAO_TOKEN": "pt-YqnPlpZGFm8j7afrxtPBK5Fq_fff863b3-3ceb-4c63-b8e6-bdc3693268c3",
+        "ORGANIZATION_ID": "624580543add99e4db45a523",
+        "TARGET_PROJECT": "简单购软件",
+        "TARGET_ASSIGNEE": "贾晨阳",
+        "BOT_WEBHOOK": "https://open.feishu.cn/open-apis/bot/v2/hook/65900b0e-3f79-42dc-9d3e-7d6d801d97ff"
     }
 ]
 
 # ==================== 2. 状态映射配置 ====================
-CREATE_TIME_CHECK_STATUSES = ["待立项", "待设计"]  # 移除 "待产品内审"
+CREATE_TIME_CHECK_STATUSES = ["待立项", "待设计"]
 STATUS_COMPLETED = ["已完成", "已发布", "已上线"]
 STATUS_CANCELLED = ["已拒绝", "暂不支持", "已取消", "已终止"]
-
 
 # ==================== 3. 工具函数与 API 接口调用 ====================
 def parse_yunxiao_time(val):
@@ -56,13 +63,11 @@ def parse_yunxiao_time(val):
     return None
 
 
-# 注意：get_headers 读取全局 YUNXIAO_TOKEN，循环的时候会动态覆盖全局变量
 def get_headers():
     return {
         "x-yunxiao-token": YUNXIAO_TOKEN,
         "Content-Type": "application/json"
     }
-
 
 def fetch_project_space_id():
     url = f"https://openapi-rdc.aliyuncs.com/oapi/v1/projex/organizations/{ORGANIZATION_ID}/projects:search"
@@ -82,7 +87,6 @@ def fetch_project_space_id():
     except Exception as e:
         print(f"❌ 查询项目 spaceId 异常: {e}")
     return None
-
 
 def fetch_recent_workitems():
     space_id = fetch_project_space_id()
@@ -126,11 +130,9 @@ def fetch_recent_workitems():
                     if not items_page:
                         break
 
-                    # 1. 先把当前页数据存入列表（保证尾页不被遗漏）
                     fetched_for_this_url.extend(items_page)
                     url_success = True
 
-                    # 2. 当前页拉取不足 100 条说明已到尾页，直接结束循环
                     if len(items_page) < 100:
                         break
 
@@ -169,29 +171,23 @@ def fetch_recent_workitems():
 
         # --- 业务筛选规则 ---
         if status_name == "待产品内审":
-            # 【待产品内审】全量统计，忽略创建时间
             match_time = True
         elif status_name in CREATE_TIME_CHECK_STATUSES:
-            # 【待立项】、【待设计】只校验近 7 天创建
             if create_dt and create_dt >= seven_days_ago:
                 match_time = True
         elif status_name in STATUS_COMPLETED or status_name in STATUS_CANCELLED:
-            # 【已完成/已取消】使用【状态变更时间 updateStatusAt】判断，不是最后修改时间
             status_change_dt = parse_yunxiao_time(item.get("updateStatusAt"))
             if status_change_dt and status_change_dt >= seven_days_ago:
                 match_time = True
             else:
-                # 状态变更时间不在统计周期，不纳入周报
                 match_time = False
         else:
-            # 其它推进中的状态（如开发中、测试中等）默认保留
             match_time = True
 
         if match_time:
             filtered_items.append(item)
 
     return filtered_items
-
 
 # ==================== 4. 数据整理与 Markdown 生成 ====================
 def generate_weekly_markdown(workitems, assignee_name):
@@ -203,9 +199,12 @@ def generate_weekly_markdown(workitems, assignee_name):
         title = item.get("subject", "未命名需求")
         status = (item.get("status") or {}).get("name", "未知状态")
         item_id = item.get("id", "") or item.get("identifier", "")
-        url = f"https://devops.aliyun.com/workitem/{item_id}" if item_id else "#"
+        
+        # 优先读取接口返回的 url/webUrl，若没有则拼接云效 projex 需求页面链接
+        url = item.get("url") or item.get("webUrl") or (f"https://devops.aliyun.com/projex/workitem/{item_id}" if item_id else "#")
 
-        item_line = f"• [{title}]({url})"
+        # 修改为图 2 要求格式：• 网址链接 《需求标题》
+        item_line = f"• {url} 《{title}》"
 
         if status in STATUS_COMPLETED:
             completed_items.append(item_line)
@@ -240,7 +239,6 @@ def generate_weekly_markdown(workitems, assignee_name):
         md_content += "\n".join(cancelled_items) + "\n\n"
 
     return md_content
-
 
 # ==================== 5. 飞书卡片消息推送 (带 SSL 重试与容错机制) ====================
 def send_feishu_card(markdown_text, count, assignee_name, webhook_url):
@@ -305,7 +303,6 @@ def send_feishu_card(markdown_text, count, assignee_name, webhook_url):
         except Exception as ex:
             print(f"❌ [{assignee_name}] 飞书推送最终失败: {ex}")
 
-
 # ==================== 主入口：循环遍历每一个人 ====================
 if __name__ == "__main__":
     for person_cfg in PERSON_CONFIGS:
@@ -325,10 +322,10 @@ if __name__ == "__main__":
         items = fetch_recent_workitems()
         print(f"📦 [{person_cfg['name']}] 共检索到 {len(items)} 条符合条件的需求数据。")
 
-        # 生成周报markdown
+        # 生成周报 markdown
         report_md = generate_weekly_markdown(items, person_cfg["name"])
 
-        # 发送对应webhook
+        # 发送对应 webhook
         print(f"📤 正在向【{person_cfg['name']}】飞书群推送周报卡片...")
         send_feishu_card(report_md, len(items), person_cfg["name"], person_cfg["BOT_WEBHOOK"])
 
