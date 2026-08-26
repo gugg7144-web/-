@@ -45,6 +45,7 @@ STATUS_CANCELLED = ["已拒绝", "暂不支持", "已取消", "已终止"]
 
 # ==================== 3. 工具函数与 API 接口调用 ====================
 def parse_yunxiao_time(val):
+    """解析云效返回的各种格式时间字符串或毫秒时间戳"""
     if not val:
         return None
     try:
@@ -62,7 +63,6 @@ def parse_yunxiao_time(val):
         pass
     return None
 
-
 def get_headers():
     return {
         "x-yunxiao-token": YUNXIAO_TOKEN,
@@ -70,6 +70,7 @@ def get_headers():
     }
 
 def fetch_project_space_id():
+    """按项目名称搜索获取对应 SpaceId"""
     url = f"https://openapi-rdc.aliyuncs.com/oapi/v1/projex/organizations/{ORGANIZATION_ID}/projects:search"
     payload = {"page": 1, "perPage": 100}
     try:
@@ -89,6 +90,7 @@ def fetch_project_space_id():
     return None
 
 def fetch_recent_workitems():
+    """获取指定负责人符合条件的需求条目"""
     space_id = fetch_project_space_id()
     if not space_id:
         print("⚠️ 未能获取到有效的 spaceId，取消需求检索。")
@@ -108,7 +110,6 @@ def fetch_recent_workitems():
         url_success = False
         fetched_for_this_url = []
 
-        # 扩充单接口翻页上限至 50 页（最大支持 5000 条需求数据）
         while page <= 50:
             payload = {
                 "category": "Req",
@@ -189,91 +190,97 @@ def fetch_recent_workitems():
 
     return filtered_items
 
-# ==================== 4. 数据整理与 Markdown 生成 ====================
-def generate_weekly_markdown(workitems, assignee_name):
-    completed_items = []
-    cancelled_items = []
-    in_progress_map = defaultdict(list)
-
-    for item in workitems:
-        title = item.get("subject", "未命名需求")
-        status = (item.get("status") or {}).get("name", "未知状态")
-        item_id = item.get("id", "") or item.get("identifier", "")
-        
-        # 优先读取接口返回的 url/webUrl，若没有则拼接云效 projex 需求页面链接
-        url = item.get("url") or item.get("webUrl") or (f"https://devops.aliyun.com/projex/workitem/{item_id}" if item_id else "#")
-
-        # 修改为图 2 要求格式：• 网址链接 《需求标题》
-        item_line = f"• {url} 《{title}》"
-
-        if status in STATUS_COMPLETED:
-            completed_items.append(item_line)
-        elif status in STATUS_CANCELLED:
-            cancelled_items.append(f"{item_line}（状态: {status}）")
-        else:
-            in_progress_map[status].append(item_line)
-
+# ==================== 4. 构造飞书 Schema 2.0 原生表格卡片 Payload ====================
+def build_feishu_card_payload(workitems, assignee_name):
+    """
+    构建符合飞书卡片 Schema 2.0 规范的真网格表格 Payload
+    表头字段：序号、项目名称、标题、网址、状态、负责人
+    """
+    today_str = datetime.now().strftime("%Y-%m-%d")
     now = datetime.now()
     start_date_str = (now - timedelta(days=7)).strftime("%m月%d日")
     end_date_str = now.strftime("%m月%d日")
 
-    md_content = f"🗓 **统计区间**：{start_date_str} ~ {end_date_str}\n\n"
+    table_rows = []
+    for idx, item in enumerate(workitems, 1):
+        title = item.get("subject", "未命名需求")
+        status = (item.get("status") or {}).get("name", "未知状态")
+        item_id = item.get("id", "") or item.get("identifier", "")
+        
+        # 获取需求链接
+        url = item.get("url") or item.get("webUrl") or (f"https://devops.aliyun.com/projex/workitem/{item_id}" if item_id else "#")
+        
+        # 获取真实空间项目名与负责人
+        project_name = (item.get("space") or {}).get("name") or TARGET_PROJECT
+        person = (item.get("assignedTo") or {}).get("name") or assignee_name
+        
+        # 管道符与中括号转义防破坏 JSON/Markdown
+        clean_title = title.replace("|", "丨").replace("\n", " ").strip()
+        
+        table_rows.append({
+            "seq": str(idx),
+            "project": project_name,
+            "title": clean_title,
+            "url": f"[{url}]({url})",
+            "status": status,
+            "assignee": person
+        })
 
-    md_content += "✅ **【已完成需求】**\n"
-    if completed_items:
-        md_content += "\n".join(completed_items) + "\n\n"
+    elements = [
+        {
+            "tag": "markdown",
+            "content": f"🗓 **统计区间**：{start_date_str} ~ {end_date_str}"
+        }
+    ]
+
+    if table_rows:
+        elements.append({
+            "tag": "table",
+            "page_size": 50,
+            "columns": [
+                {"name": "seq", "display_name": "序号", "data_type": "text", "width": "auto"},
+                {"name": "project", "display_name": "项目名称", "data_type": "text", "width": "auto"},
+                {"name": "title", "display_name": "标题", "data_type": "text", "width": "auto"},
+                {"name": "url", "display_name": "网址", "data_type": "lark_md", "width": "auto"},
+                {"name": "status", "display_name": "状态", "data_type": "text", "width": "auto"},
+                {"name": "assignee", "display_name": "负责人", "data_type": "text", "width": "auto"}
+            ],
+            "rows": table_rows
+        })
     else:
-        md_content += "• 本周暂无已完成需求\n\n"
+        elements.append({
+            "tag": "markdown",
+            "content": "🎉 本周暂无符合条件的需求更新。"
+        })
 
-    md_content += "🔄 **【推进中的需求】**\n"
-    if in_progress_map:
-        for status_node, items in in_progress_map.items():
-            md_content += f"📌 **{status_node}** ({len(items)})\n"
-            md_content += "\n".join(items) + "\n"
-        md_content += "\n"
-    else:
-        md_content += "• 当前无推进中的需求\n\n"
-
-    if cancelled_items:
-        md_content += "🚫 **【终止/已取消需求】**\n"
-        md_content += "\n".join(cancelled_items) + "\n\n"
-
-    return md_content
-
-# ==================== 5. 飞书卡片消息推送 (带 SSL 重试与容错机制) ====================
-def send_feishu_card(markdown_text, count, assignee_name, webhook_url):
-    today_str = datetime.now().strftime("%Y-%m-%d")
+    elements.append({"tag": "hr"})
+    # 使用 Schema 2.0 兼容的 markdown 浅灰色文本块替代废弃的 note 标签
+    elements.append({
+        "tag": "markdown",
+        "content": f"<font color='grey'>👤 负责人：{assignee_name} | 📈 本周包含需求共 {len(workitems)} 项 | 🤖 自动化推送</font>"
+    })
 
     payload = {
         "msg_type": "interactive",
         "card": {
+            "schema": "2.0",
             "header": {
                 "title": {
                     "tag": "plain_text",
-                    "content": f"📊 【简单购软件】需求进度周报 ({today_str})"
+                    "content": f"📊 【{TARGET_PROJECT}】需求进度周报 ({today_str})"
                 },
                 "template": "blue"
             },
-            "elements": [
-                {
-                    "tag": "markdown",
-                    "content": markdown_text
-                },
-                {
-                    "tag": "hr"
-                },
-                {
-                    "tag": "note",
-                    "elements": [
-                        {
-                            "tag": "plain_text",
-                            "content": f"👤 负责人：{assignee_name} | 📈 本周包含需求共 {count} 项 | 🤖 自动化推送"
-                        }
-                    ]
-                }
-            ]
+            "body": {
+                "elements": elements
+            }
         }
     }
+    return payload
+
+# ==================== 5. 飞书卡片消息推送 (带 SSL 重试与容错机制) ====================
+def send_feishu_card(workitems, assignee_name, webhook_url):
+    payload = build_feishu_card_payload(workitems, assignee_name)
 
     session = requests.Session()
     retries = Retry(total=3, backoff_factor=1, status_forcelist=[500, 502, 503, 504])
@@ -288,7 +295,7 @@ def send_feishu_card(markdown_text, count, assignee_name, webhook_url):
         res = session.post(webhook_url, json=payload, headers=headers, timeout=15)
         res_json = res.json()
         if res_json.get("code") == 0 or res_json.get("StatusCode") == 0:
-            print(f"✅ [{assignee_name}] 飞书卡片周报发送成功！")
+            print(f"✅ [{assignee_name}] 飞书网格表格周报卡片发送成功！")
         else:
             print(f"⚠️ [{assignee_name}] 飞书推送返回异常: {res_json}")
     except Exception as e:
@@ -297,7 +304,7 @@ def send_feishu_card(markdown_text, count, assignee_name, webhook_url):
             res = requests.post(webhook_url, json=payload, headers=headers, timeout=15, verify=False)
             res_json = res.json()
             if res_json.get("code") == 0 or res_json.get("StatusCode") == 0:
-                print(f"✅ [{assignee_name}] 飞书卡片周报（容错模式）发送成功！")
+                print(f"✅ [{assignee_name}] 飞书网格表格周报卡片（容错模式）发送成功！")
             else:
                 print(f"⚠️ [{assignee_name}] 飞书推送返回异常: {res_json}")
         except Exception as ex:
@@ -322,11 +329,8 @@ if __name__ == "__main__":
         items = fetch_recent_workitems()
         print(f"📦 [{person_cfg['name']}] 共检索到 {len(items)} 条符合条件的需求数据。")
 
-        # 生成周报 markdown
-        report_md = generate_weekly_markdown(items, person_cfg["name"])
-
-        # 发送对应 webhook
-        print(f"📤 正在向【{person_cfg['name']}】飞书群推送周报卡片...")
-        send_feishu_card(report_md, len(items), person_cfg["name"], person_cfg["BOT_WEBHOOK"])
+        # 发送对应 webhook 网格表格周报卡片
+        print(f"📤 正在向【{person_cfg['name']}】飞书群推送网格表格周报卡片...")
+        send_feishu_card(items, person_cfg["name"], person_cfg["BOT_WEBHOOK"])
 
     print("\n🎉 全部人员周报任务执行完毕！")
