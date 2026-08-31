@@ -38,10 +38,44 @@ PERSON_CONFIGS = [
     }
 ]
 
-# ==================== 2. 状态映射配置 ====================
+# ==================== 2. 状态映射与排序优先级配置 ====================
 CREATE_TIME_CHECK_STATUSES = ["待立项", "待设计"]
 STATUS_COMPLETED = ["已完成", "已发布", "已上线"]
 STATUS_CANCELLED = ["已拒绝", "暂不支持", "已取消", "已终止"]
+
+# 定义状态展示的优先级（按需求推进生命周期顺序排序）
+# 补全了“待用例评审”、“进行中”、“研发中”等中间节点
+STATUS_ORDER = [
+    "待产品内审",
+    "待立项",
+    "待设计",
+    "待研发评审",
+    "待用例评审",
+    "待确认",
+    "待排期",
+    "待开发",
+    "开发中",
+    "进行中",
+    "研发中",
+    "待联调",
+    "待测试",
+    "测试中",
+    "待上线",
+    "已上线",
+    "已完成",
+    "已发布",
+    "已拒绝",
+    "暂不支持",
+    "已取消",
+    "已终止"
+]
+
+def get_status_sort_key(item):
+    """获取需求状态的排序 Key，保证同状态归类聚拢"""
+    status_name = (item.get("status") or {}).get("name", "未知状态")
+    if status_name in STATUS_ORDER:
+        return (0, STATUS_ORDER.index(status_name))
+    return (1, status_name)
 
 # ==================== 3. 工具函数与 API 接口调用 ====================
 def parse_yunxiao_time(val):
@@ -90,7 +124,7 @@ def fetch_project_space_id():
     return None
 
 def fetch_recent_workitems():
-    """获取指定负责人符合条件的需求条目"""
+    """获取指定负责人/创建人符合条件的需求条目"""
     space_id = fetch_project_space_id()
     if not space_id:
         print("⚠️ 未能获取到有效的 spaceId，取消需求检索。")
@@ -156,19 +190,29 @@ def fetch_recent_workitems():
 
     for item in raw_items:
         space_name = (item.get("space") or {}).get("name", "")
-        assigned_to = (item.get("assignedTo") or {}).get("name", "")
+        
+        # 多字段兼容提取：获取负责人与创建人信息
+        assigned_to_obj = item.get("assignedTo") or {}
+        assigned_to_name = assigned_to_obj.get("name", "") if isinstance(assigned_to_obj, dict) else str(assigned_to_obj or "")
+        if not assigned_to_name:
+            assigned_to_name = item.get("assignedToName") or ""
+
+        creator_obj = item.get("creator") or {}
+        creator_name = creator_obj.get("name", "") if isinstance(creator_obj, dict) else str(creator_obj or "")
+        if not creator_name:
+            creator_name = item.get("creatorName") or ""
+
         status_name = (item.get("status") or {}).get("name", "")
 
         match_project = (not TARGET_PROJECT) or (TARGET_PROJECT in space_name)
-        match_assignee = (not TARGET_ASSIGNEE) or (TARGET_ASSIGNEE in assigned_to)
+        
+        # 核心筛选逻辑：只要是“需求创建人”包含目标人员，或者“当前负责人”包含目标人员，均纳入该成员周报
+        match_person = (not TARGET_ASSIGNEE) or (TARGET_ASSIGNEE in assigned_to_name or TARGET_ASSIGNEE in creator_name)
 
-        if not (match_project and match_assignee):
+        if not (match_project and match_person):
             continue
 
         create_dt = parse_yunxiao_time(item.get("gmtCreate"))
-        modify_dt = parse_yunxiao_time(item.get("gmtModified")) or create_dt
-
-        match_time = False
 
         # --- 业务筛选规则 ---
         if status_name == "待产品内审":
@@ -176,13 +220,20 @@ def fetch_recent_workitems():
         elif status_name in CREATE_TIME_CHECK_STATUSES:
             if create_dt and create_dt >= seven_days_ago:
                 match_time = True
+            else:
+                match_time = False
         elif status_name in STATUS_COMPLETED or status_name in STATUS_CANCELLED:
-            status_change_dt = parse_yunxiao_time(item.get("updateStatusAt"))
+            status_change_dt = (
+                parse_yunxiao_time(item.get("updateStatusAt")) or 
+                parse_yunxiao_time(item.get("gmtModified")) or 
+                create_dt
+            )
             if status_change_dt and status_change_dt >= seven_days_ago:
                 match_time = True
             else:
                 match_time = False
         else:
+            # “开发中”、“测试中”、“待排期”等推进中节点无条件保留
             match_time = True
 
         if match_time:
@@ -201,8 +252,11 @@ def build_feishu_card_payload(workitems, assignee_name):
     start_date_str = (now - timedelta(days=7)).strftime("%m月%d日")
     end_date_str = now.strftime("%m月%d日")
 
+    # 按状态优先级进行统一分组与排序
+    sorted_workitems = sorted(workitems, key=get_status_sort_key)
+
     table_rows = []
-    for idx, item in enumerate(workitems, 1):
+    for idx, item in enumerate(sorted_workitems, 1):
         title = item.get("subject", "未命名需求")
         status = (item.get("status") or {}).get("name", "未知状态")
         item_id = item.get("id", "") or item.get("identifier", "")
@@ -210,9 +264,11 @@ def build_feishu_card_payload(workitems, assignee_name):
         # 获取需求链接
         url = item.get("url") or item.get("webUrl") or (f"https://devops.aliyun.com/projex/workitem/{item_id}" if item_id else "#")
         
-        # 获取真实空间项目名与负责人
+        # 获取真实空间项目名
         project_name = (item.get("space") or {}).get("name") or TARGET_PROJECT
-        person = (item.get("assignedTo") or {}).get("name") or assignee_name
+        
+        # 负责人展示逻辑：周报属于谁，负责人列统一展示谁
+        person = assignee_name
         
         # 管道符与中括号转义防破坏 JSON/Markdown
         clean_title = title.replace("|", "丨").replace("\n", " ").strip()
